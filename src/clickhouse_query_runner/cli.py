@@ -14,8 +14,7 @@ from clickhouse_query_runner import parser, runner, settings
 
 
 def setup_logging(
-    rich_console: console.Console,
-    verbose: bool = False,
+    rich_console: console.Console, verbose: bool = False
 ) -> None:
     """Configure logging for the application."""
     level = logging.DEBUG if verbose else logging.INFO

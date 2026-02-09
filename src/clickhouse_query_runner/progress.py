@@ -34,8 +34,10 @@ class QueryProgress:
             progress.TextColumn('{task.fields[rate]}'),
             progress.TimeRemainingColumn(),
         )
-        description = f'Overall Progress for {filename}' if filename else (
-            'Overall Progress'
+        description = (
+            f'Overall Progress for {filename}'
+            if filename
+            else ('Overall Progress')
         )
         self.batch_task = self.batch_progress.add_task(
             description, total=total_queries, rate=''
@@ -128,15 +130,11 @@ class QueryProgress:
             for aq in self._active_queries.values():
                 rows, total, bytes_val = _query_metrics(aq)
                 bar = progress.ProgressBar(
-                    total=max(total, 1),
-                    completed=rows,
-                    width=32,
+                    total=max(total, 1), completed=rows, width=32
                 )
                 rows_str = _format_rows(rows, total)
                 bytes_str = _human_bytes(bytes_val)
-                elapsed_str = _format_elapsed(
-                    time.monotonic() - aq.start_time
-                )
+                elapsed_str = _format_elapsed(time.monotonic() - aq.start_time)
                 query_table.add_row(
                     aq.node.split('.', maxsplit=1)[0],
                     str(aq.offset),

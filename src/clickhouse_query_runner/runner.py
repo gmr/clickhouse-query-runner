@@ -51,9 +51,7 @@ class QueryRunner:
         self._failure: _QueryFailure | None = None
         self._stop_dispatch = False
         self._progress: progress.QueryProgress | None = None
-        self._poll_conns: dict[
-            str, asynch_connection.Connection
-        ] = {}
+        self._poll_conns: dict[str, asynch_connection.Connection] = {}
         self._poll_task: asyncio.Task[None] | None = None
 
     def _conn_kwargs(self, node: str) -> dict[str, object]:
@@ -73,24 +71,17 @@ class QueryRunner:
             1, -(-self.settings.concurrency // len(self.nodes))
         )
         for node in self.nodes:
-            pool: asyncio.Queue[asynch_connection.Connection] = (
-                asyncio.Queue()
-            )
+            pool: asyncio.Queue[asynch_connection.Connection] = asyncio.Queue()
             for _ in range(conns_per_node):
-                conn = asynch_connection.Connection(
-                    **self._conn_kwargs(node)
-                )
+                conn = asynch_connection.Connection(**self._conn_kwargs(node))
                 await conn.connect()
                 pool.put_nowait(conn)
             self._conn_pools[node] = pool
-            poll_conn = asynch_connection.Connection(
-                **self._conn_kwargs(node)
-            )
+            poll_conn = asynch_connection.Connection(**self._conn_kwargs(node))
             await poll_conn.connect()
             self._poll_conns[node] = poll_conn
             LOGGER.debug(
-                'Connected %d + 1 poll connections to %s',
-                conns_per_node, node,
+                'Connected %d + 1 poll connections to %s', conns_per_node, node
             )
         await self.checkpoint_mgr.connect()
 
@@ -106,16 +97,12 @@ class QueryRunner:
                 try:
                     await conn.close()
                 except OSError:
-                    LOGGER.debug(
-                        'Error closing connection to %s', node
-                    )
+                    LOGGER.debug('Error closing connection to %s', node)
         for node, conn in self._poll_conns.items():
             try:
                 await conn.close()
             except OSError:
-                LOGGER.debug(
-                    'Error closing poll connection to %s', node
-                )
+                LOGGER.debug('Error closing poll connection to %s', node)
         await self.checkpoint_mgr.close()
 
     async def run(
@@ -176,9 +163,7 @@ class QueryRunner:
                 tasks.append(task)
 
             if tasks:
-                results = await asyncio.gather(
-                    *tasks, return_exceptions=True
-                )
+                results = await asyncio.gather(*tasks, return_exceptions=True)
                 for result in results:
                     if isinstance(result, Exception):
                         self._stop_dispatch = True
@@ -306,9 +291,7 @@ class QueryRunner:
         LOGGER.info('Cancelling in-flight queries')
         for node in self.nodes:
             try:
-                conn = asynch_connection.Connection(
-                    **self._conn_kwargs(node)
-                )
+                conn = asynch_connection.Connection(**self._conn_kwargs(node))
                 await conn.connect()
                 try:
                     async with conn.cursor() as cursor:
