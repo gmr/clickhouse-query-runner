@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "clickhouse-query-runner"
-version = "1.0.0"
+version = "1.1.0"
 description = "CLI tool to execute SQL queries against a ClickHouse cluster with checkpointing and progress monitoring"
 authors = [
   {name = "Gavin M. Roy", email = "gavinr@aweber.com"},
