@@ -73,13 +73,23 @@ class QueryRunner:
         )
         for node in self.nodes:
             pool: asyncio.Queue[asynch_connection.Connection] = asyncio.Queue()
-            for _ in range(conns_per_node):
-                conn = asynch_connection.Connection(**self._conn_kwargs(node))
-                await conn.connect()
-                pool.put_nowait(conn)
+            try:
+                for _ in range(conns_per_node):
+                    conn = asynch_connection.Connection(
+                        **self._conn_kwargs(node)
+                    )
+                    await conn.connect()
+                    pool.put_nowait(conn)
+                poll_conn = asynch_connection.Connection(
+                    **self._conn_kwargs(node)
+                )
+                await poll_conn.connect()
+            except OSError:
+                while not pool.empty():
+                    with contextlib.suppress(OSError):
+                        await pool.get_nowait().close()
+                raise
             self._conn_pools[node] = pool
-            poll_conn = asynch_connection.Connection(**self._conn_kwargs(node))
-            await poll_conn.connect()
             self._poll_conns[node] = poll_conn
             LOGGER.debug(
                 'Connected %d + 1 poll connections to %s', conns_per_node, node
@@ -270,6 +280,10 @@ class QueryRunner:
                             await cursor.execute(PROGRESS_QUERY)
                             rows = await cursor.fetchall()
                             for row in rows:
+                                # Columns: query_id[0], read_rows[1],
+                                # total_rows_approx[2], elapsed[3],
+                                # written_rows[4], read_bytes[5],
+                                # written_bytes[6]
                                 self._progress.update_query(
                                     query_id=row[0],
                                     read_rows=row[1] or 0,

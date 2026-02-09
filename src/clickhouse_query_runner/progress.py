@@ -130,7 +130,7 @@ class QueryProgress:
             for aq in self._active_queries.values():
                 rows, total, bytes_val = _query_metrics(aq)
                 bar = progress.ProgressBar(
-                    total=max(total, 1), completed=rows, width=32
+                    total=max(total, rows, 1), completed=rows, width=32
                 )
                 rows_str = _format_rows(rows, total)
                 bytes_str = _human_bytes(bytes_val)

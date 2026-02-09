@@ -421,11 +421,14 @@ class PollAllProgressTests(unittest.IsolatedAsyncioTestCase):
         task = asyncio.create_task(qr._poll_all_progress())
         await asyncio.sleep(0.05)
         task.cancel()
-        await task
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
         self.assertTrue(task.done())
 
     async def test_updates_progress_on_rows(self) -> None:
         qr = runner.QueryRunner(_make_settings(host='n1', poll_interval=0.001))
+        # Tuple: (query_id, read_rows, total_rows_approx, elapsed,
+        #         written_rows, read_bytes, written_bytes)
         qr._poll_conns = {
             'n1': _mock_conn(
                 fetchall_return=[('qid-1', 500, 1000, 2.5, 200, 4096, 2048)]

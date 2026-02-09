@@ -12,6 +12,8 @@ from rich import logging as rich_logging
 
 from clickhouse_query_runner import parser, runner, settings
 
+LOGGER = logging.getLogger(__name__)
+
 
 def setup_logging(
     rich_console: console.Console, verbose: bool = False
@@ -94,6 +96,7 @@ async def _async_main(
 
         rich_console.print('[green]All queries completed successfully[/green]')
     except (OSError, ValueError, TypeError, RuntimeError) as err:
+        LOGGER.debug('Fatal error', exc_info=True)
         rich_console.print(f'[red]Error: {err}[/red]')
         sys.exit(1)
     finally:
