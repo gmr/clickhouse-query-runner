@@ -494,6 +494,16 @@ class CancelInFlightTests(unittest.IsolatedAsyncioTestCase):
         with mock.patch('asynch.connection.Connection', return_value=conn):
             await qr._cancel_in_flight()  # Should not raise
 
+    async def test_handles_unexpected_packet_error(self) -> None:
+        qr = runner.QueryRunner(_make_settings(host='n1'))
+        conn = _mock_conn(
+            execute_side_effect=(
+                asynch_errors.UnexpectedPacketFromServerError('bad')
+            )
+        )
+        with mock.patch('asynch.connection.Connection', return_value=conn):
+            await qr._cancel_in_flight()  # Should not raise
+
 
 class QueryFailureTests(unittest.TestCase):
     """Tests for _QueryFailure."""

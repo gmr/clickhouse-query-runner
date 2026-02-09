@@ -145,7 +145,10 @@ class QueryRunner:
 
         filename = str(self.settings.query_file).rsplit('/', maxsplit=1)[-1]
         self._progress = progress.QueryProgress(
-            len(queries), filename=filename, console=console
+            len(queries),
+            filename=filename,
+            console=console,
+            concurrency=self.settings.concurrency,
         )
         if skipped:
             self._progress.mark_skipped(skipped)
@@ -313,7 +316,11 @@ class QueryRunner:
                         )
                 finally:
                     await conn.close()
-            except (OSError, asynch_errors.ServerException):  # fmt: skip
+            except (
+                OSError,
+                asynch_errors.ServerException,
+                asynch_errors.UnexpectedPacketFromServerError,
+            ):
                 LOGGER.debug('Error cancelling queries on %s', node)
 
     @property

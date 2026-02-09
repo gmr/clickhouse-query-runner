@@ -135,6 +135,41 @@ class FormatRateTests(unittest.TestCase):
         self.assertEqual(qp._format_rate(), '2.0s/q')
 
 
+class FormatEtaTests(unittest.TestCase):
+    """Tests for _format_eta."""
+
+    def test_no_times(self) -> None:
+        qp = progress.QueryProgress(10, concurrency=2)
+        self.assertEqual(qp._format_eta(), '')
+
+    def test_calculates_with_concurrency(self) -> None:
+        qp = progress.QueryProgress(100, concurrency=4)
+        qp.completed_count = 10
+        qp._recent_times.append(60.0)
+        # 90 remaining * 60s / 4 concurrency = 1350s = 22:30
+        self.assertEqual(qp._format_eta(), '22:30')
+
+    def test_all_complete(self) -> None:
+        qp = progress.QueryProgress(5, concurrency=2)
+        qp.completed_count = 5
+        qp._recent_times.append(10.0)
+        self.assertEqual(qp._format_eta(), '0:00')
+
+    def test_single_concurrency(self) -> None:
+        qp = progress.QueryProgress(10, concurrency=1)
+        qp.completed_count = 5
+        qp._recent_times.append(10.0)
+        # 5 remaining * 10s / 1 = 50s
+        self.assertEqual(qp._format_eta(), '0:50')
+
+    def test_hours_format(self) -> None:
+        qp = progress.QueryProgress(500, concurrency=4)
+        qp.completed_count = 10
+        qp._recent_times.append(65.0)
+        # 490 remaining * 65s / 4 = 7962.5s ≈ 2:12:42
+        self.assertEqual(qp._format_eta(), '2:12:42')
+
+
 class RenderTests(unittest.TestCase):
     """Tests for _render."""
 

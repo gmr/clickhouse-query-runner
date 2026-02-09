@@ -17,9 +17,11 @@ class QueryProgress:
         total_queries: int,
         filename: str = '',
         console: rich_console.Console | None = None,
+        concurrency: int = 1,
     ) -> None:
         self.total_queries = total_queries
         self.completed_count = 0
+        self._concurrency = max(concurrency, 1)
         self._console = console or rich_console.Console()
         self._recent_times: collections.deque[float] = collections.deque(
             maxlen=10
@@ -32,7 +34,7 @@ class QueryProgress:
             progress.MofNCompleteColumn(),
             progress.TextColumn('queries'),
             progress.TextColumn('{task.fields[rate]}'),
-            progress.TimeRemainingColumn(),
+            progress.TextColumn('{task.fields[eta]}'),
         )
         description = (
             f'Overall Progress for {filename}'
@@ -40,7 +42,7 @@ class QueryProgress:
             else ('Overall Progress')
         )
         self.batch_task = self.batch_progress.add_task(
-            description, total=total_queries, rate=''
+            description, total=total_queries, rate='', eta=''
         )
         self._active_queries: dict[str, _ActiveQuery] = {}
         self._live: live.Live | None = None
@@ -84,8 +86,9 @@ class QueryProgress:
         self._recent_times.append(elapsed)
         self.completed_count += 1
         rate = self._format_rate()
+        eta = self._format_eta()
         self.batch_progress.update(
-            self.batch_task, completed=self.completed_count, rate=rate
+            self.batch_task, completed=self.completed_count, rate=rate, eta=eta
         )
         self._refresh()
 
@@ -102,6 +105,21 @@ class QueryProgress:
             return ''
         avg = sum(self._recent_times) / len(self._recent_times)
         return f'{avg:.1f}s/q'
+
+    def _format_eta(self) -> str:
+        """Format estimated time remaining.
+
+        Uses the rolling average per-query time divided by concurrency
+        to estimate wall-clock time for remaining queries.
+        """
+        if not self._recent_times:
+            return ''
+        remaining = self.total_queries - self.completed_count
+        if remaining <= 0:
+            return '0:00'
+        avg = sum(self._recent_times) / len(self._recent_times)
+        seconds = remaining * avg / self._concurrency
+        return _format_elapsed(seconds)
 
     def _render(self) -> table.Table:
         """Build the composite display."""
