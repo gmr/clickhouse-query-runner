@@ -28,7 +28,7 @@ def parse_sql_file(file_path: str) -> list[tuple[str, str]]:
         query_hash = hashlib.sha256(stripped.encode()).hexdigest()
         result.append((query_hash, stripped))
 
-    LOGGER.info('Parsed %d queries from %s', len(result), file_path)
+    LOGGER.debug('Parsed %d queries from %s', len(result), file_path)
     return result
 
 

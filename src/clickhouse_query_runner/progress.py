@@ -5,15 +5,22 @@ from __future__ import annotations
 import collections
 import time
 
+from rich import console as rich_console
 from rich import live, progress, table
 
 
 class QueryProgress:
     """Manages the Rich live display for batch and per-query progress."""
 
-    def __init__(self, total_queries: int) -> None:
+    def __init__(
+        self,
+        total_queries: int,
+        filename: str = '',
+        console: rich_console.Console | None = None,
+    ) -> None:
         self.total_queries = total_queries
         self.completed_count = 0
+        self._console = console or rich_console.Console()
         self._recent_times: collections.deque[float] = collections.deque(
             maxlen=10
         )
@@ -27,32 +34,24 @@ class QueryProgress:
             progress.TextColumn('{task.fields[rate]}'),
             progress.TimeRemainingColumn(),
         )
+        description = f'Overall Progress for {filename}' if filename else (
+            'Overall Progress'
+        )
         self.batch_task = self.batch_progress.add_task(
-            'Backfill', total=total_queries, rate=''
-        )
-        self.active_table = table.Table(
-            title=None, box=None, show_header=True, pad_edge=False
-        )
-        self.active_table.add_column('Node', style='cyan', min_width=16)
-        self.active_table.add_column(
-            'Offset', style='white', justify='right', min_width=6
-        )
-        self.active_table.add_column('Progress', min_width=36)
-        self.active_table.add_column(
-            'Rows Read', style='green', justify='right', min_width=14
-        )
-        self.active_table.add_column(
-            'Progress', style='yellow', justify='right', min_width=8
-        )
-        self.active_table.add_column(
-            'Elapsed', style='blue', justify='right', min_width=8
+            description, total=total_queries, rate=''
         )
         self._active_queries: dict[str, _ActiveQuery] = {}
         self._live: live.Live | None = None
 
+    def __rich__(self) -> table.Table:
+        """Support dynamic rendering by Rich Live auto-refresh."""
+        return self._render()
+
     def start(self) -> live.Live:
         """Create and return the Live context manager."""
-        self._live = live.Live(self._render(), refresh_per_second=4)
+        self._live = live.Live(
+            self, console=self._console, refresh_per_second=4
+        )
         return self._live
 
     def mark_started(self, query_id: str, node: str, offset: int) -> None:
@@ -66,16 +65,18 @@ class QueryProgress:
         query_id: str,
         read_rows: int,
         total_rows: int,
-        elapsed: float,
-        pct: float,
+        written_rows: int,
+        read_bytes: int,
+        written_bytes: int,
     ) -> None:
         """Update progress for an active query."""
         if query_id in self._active_queries:
             aq = self._active_queries[query_id]
             aq.read_rows = read_rows
             aq.total_rows = total_rows
-            aq.elapsed = elapsed
-            aq.pct = pct
+            aq.written_rows = written_rows
+            aq.read_bytes = read_bytes
+            aq.written_bytes = written_bytes
 
     def mark_completed(self, query_id: str, elapsed: float) -> None:
         """Record that a query has completed."""
@@ -116,29 +117,32 @@ class QueryProgress:
             )
             query_table.add_column('Progress', min_width=36)
             query_table.add_column(
-                'Rows Read', style='green', justify='right', min_width=14
+                'Rows', style='green', justify='right', min_width=14
             )
             query_table.add_column(
-                'Progress', style='yellow', justify='right', min_width=8
+                'Bytes', style='magenta', justify='right', min_width=10
             )
             query_table.add_column(
                 'Elapsed', style='blue', justify='right', min_width=8
             )
             for aq in self._active_queries.values():
+                rows, total, bytes_val = _query_metrics(aq)
                 bar = progress.ProgressBar(
-                    total=max(aq.total_rows, 1),
-                    completed=aq.read_rows,
+                    total=max(total, 1),
+                    completed=rows,
                     width=32,
                 )
-                rows_str = _format_rows(aq.read_rows, aq.total_rows)
-                pct_str = f'{aq.pct:.1f}%' if aq.pct > 0 else ''
-                elapsed_str = _format_elapsed(aq.elapsed)
+                rows_str = _format_rows(rows, total)
+                bytes_str = _human_bytes(bytes_val)
+                elapsed_str = _format_elapsed(
+                    time.monotonic() - aq.start_time
+                )
                 query_table.add_row(
-                    aq.node,
+                    aq.node.split('.', maxsplit=1)[0],
                     str(aq.offset),
                     bar,
                     rows_str,
-                    pct_str,
+                    bytes_str,
                     elapsed_str,
                 )
             layout.add_row(query_table)
@@ -147,7 +151,7 @@ class QueryProgress:
     def _refresh(self) -> None:
         """Refresh the live display."""
         if self._live is not None:
-            self._live.update(self._render())
+            self._live.refresh()
 
 
 class _ActiveQuery:
@@ -156,11 +160,12 @@ class _ActiveQuery:
     __slots__ = (
         'node',
         'offset',
-        'start_time',
+        'read_bytes',
         'read_rows',
+        'start_time',
         'total_rows',
-        'elapsed',
-        'pct',
+        'written_bytes',
+        'written_rows',
     )
 
     def __init__(self, node: str, offset: int, start_time: float) -> None:
@@ -169,13 +174,29 @@ class _ActiveQuery:
         self.start_time = start_time
         self.read_rows = 0
         self.total_rows = 0
-        self.elapsed = 0.0
-        self.pct = 0.0
+        self.written_rows = 0
+        self.read_bytes = 0
+        self.written_bytes = 0
 
 
-def _format_rows(read: int, total: int) -> str:
+def _query_metrics(aq: _ActiveQuery) -> tuple[int, int, int]:
+    """Pick the best available row and byte metrics for display.
+
+    Returns (active_rows, total_rows, active_bytes) preferring
+    write metrics for write-heavy queries and read metrics otherwise.
+    """
+    if aq.written_rows > 0 and aq.written_rows >= aq.read_rows:
+        return aq.written_rows, aq.total_rows, aq.written_bytes
+    return aq.read_rows, aq.total_rows, aq.read_bytes
+
+
+def _format_rows(active: int, total: int) -> str:
     """Format row counts for display."""
-    return f'{_human_number(read)} / {_human_number(total)}'
+    if total:
+        return f'{_human_number(active)} / {_human_number(total)}'
+    if active:
+        return _human_number(active)
+    return ''
 
 
 def _human_number(n: int) -> str:
@@ -187,6 +208,19 @@ def _human_number(n: int) -> str:
     if n >= 1_000:
         return f'{n / 1_000:.1f}K'
     return str(n)
+
+
+def _human_bytes(n: int) -> str:
+    """Format bytes with KiB/MiB/GiB suffixes."""
+    if n >= 1_073_741_824:
+        return f'{n / 1_073_741_824:.1f} GiB'
+    if n >= 1_048_576:
+        return f'{n / 1_048_576:.1f} MiB'
+    if n >= 1_024:
+        return f'{n / 1_024:.1f} KiB'
+    if n > 0:
+        return f'{n} B'
+    return ''
 
 
 def _format_elapsed(seconds: float) -> str:

@@ -13,21 +13,28 @@ from rich import logging as rich_logging
 from clickhouse_query_runner import parser, runner, settings
 
 
-def setup_logging(verbose: bool = False) -> None:
+def setup_logging(
+    rich_console: console.Console,
+    verbose: bool = False,
+) -> None:
     """Configure logging for the application."""
     level = logging.DEBUG if verbose else logging.INFO
     logging.basicConfig(
         level=level,
         format='%(message)s',
-        handlers=[rich_logging.RichHandler(rich_tracebacks=True)],
+        handlers=[
+            rich_logging.RichHandler(
+                console=rich_console, rich_tracebacks=True
+            )
+        ],
     )
 
 
 def main() -> None:
     """Main entry point."""
     runner_settings = settings.RunnerSettings()
-    setup_logging(runner_settings.verbose)
     rich_console = console.Console()
+    setup_logging(rich_console, runner_settings.verbose)
 
     query_file = pathlib.Path(runner_settings.query_file)
     if not query_file.exists():
@@ -70,7 +77,7 @@ async def _async_main(
             )
             return
 
-        success = await query_runner.run(queries)
+        success = await query_runner.run(queries, console=rich_console)
 
         if not success:
             failure = query_runner.failure

@@ -33,13 +33,17 @@ class SetupLoggingTests(unittest.TestCase):
     def test_default_level(self) -> None:
         import logging
 
-        cli.setup_logging(verbose=False)
+        from rich import console
+
+        cli.setup_logging(console.Console(), verbose=False)
         self.assertEqual(logging.getLogger().level, logging.INFO)
 
     def test_verbose_level(self) -> None:
         import logging
 
-        cli.setup_logging(verbose=True)
+        from rich import console
+
+        cli.setup_logging(console.Console(), verbose=True)
         self.assertEqual(logging.getLogger().level, logging.DEBUG)
 
 

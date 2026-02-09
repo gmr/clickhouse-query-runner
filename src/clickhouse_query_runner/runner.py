@@ -13,6 +13,7 @@ import uuid
 
 from asynch import connection as asynch_connection
 from asynch import errors as asynch_errors
+from rich import console as rich_console
 
 from clickhouse_query_runner import checkpoint, progress, settings
 
@@ -21,12 +22,14 @@ LOGGER = logging.getLogger(__name__)
 PROGRESS_QUERY = """\
 SELECT query_id,
        read_rows,
-       total_rows_to_read,
+       total_rows_approx,
        elapsed,
-       round(100.0 * read_rows / nullif(total_rows_to_read, 0), 1)
-           AS progress_percent
+       written_rows,
+       read_bytes,
+       written_bytes
   FROM system.processes
- WHERE query_id = %(query_id)s"""
+ WHERE user = currentUser()
+   AND query_id != ''"""
 
 
 class QueryRunner:
@@ -35,7 +38,9 @@ class QueryRunner:
     def __init__(self, runner_settings: settings.RunnerSettings) -> None:
         self.settings = runner_settings
         self.nodes = [h.strip() for h in runner_settings.host.split(',')]
-        self.connections: dict[str, asynch_connection.Connection] = {}
+        self._conn_pools: dict[
+            str, asyncio.Queue[asynch_connection.Connection]
+        ] = {}
         self.node_cycle = itertools.cycle(self.nodes)
         self.checkpoint_mgr = checkpoint.CheckpointManager(
             valkey_url=runner_settings.valkey_url,
@@ -46,40 +51,83 @@ class QueryRunner:
         self._failure: _QueryFailure | None = None
         self._stop_dispatch = False
         self._progress: progress.QueryProgress | None = None
-        self._poll_tasks: set[asyncio.Task[None]] = set()
+        self._poll_conns: dict[
+            str, asynch_connection.Connection
+        ] = {}
+        self._poll_task: asyncio.Task[None] | None = None
+
+    def _conn_kwargs(self, node: str) -> dict[str, object]:
+        """Return connection kwargs for a node."""
+        return {
+            'host': node,
+            'port': self.settings.port,
+            'database': self.settings.database,
+            'user': self.settings.user,
+            'password': self.settings.password.get_secret_value(),
+            'secure': self.settings.secure,
+        }
 
     async def connect(self) -> None:
-        """Establish connections to all ClickHouse nodes."""
+        """Establish connection pools for all ClickHouse nodes."""
+        conns_per_node = max(
+            1, -(-self.settings.concurrency // len(self.nodes))
+        )
         for node in self.nodes:
-            conn = asynch_connection.Connection(
-                host=node,
-                port=self.settings.port,
-                database=self.settings.database,
-                user=self.settings.user,
-                password=(self.settings.password.get_secret_value()),
-                secure=self.settings.secure,
+            pool: asyncio.Queue[asynch_connection.Connection] = (
+                asyncio.Queue()
             )
-            await conn.connect()
-            self.connections[node] = conn
-            LOGGER.debug('Connected to ClickHouse node %s', node)
+            for _ in range(conns_per_node):
+                conn = asynch_connection.Connection(
+                    **self._conn_kwargs(node)
+                )
+                await conn.connect()
+                pool.put_nowait(conn)
+            self._conn_pools[node] = pool
+            poll_conn = asynch_connection.Connection(
+                **self._conn_kwargs(node)
+            )
+            await poll_conn.connect()
+            self._poll_conns[node] = poll_conn
+            LOGGER.debug(
+                'Connected %d + 1 poll connections to %s',
+                conns_per_node, node,
+            )
         await self.checkpoint_mgr.connect()
 
     async def close(self) -> None:
         """Close all connections."""
-        for task in self._poll_tasks:
-            task.cancel()
-        for node, conn in self.connections.items():
+        if self._poll_task is not None:
+            self._poll_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, OSError):
+                await self._poll_task
+        for node, pool in self._conn_pools.items():
+            while not pool.empty():
+                conn = pool.get_nowait()
+                try:
+                    await conn.close()
+                except OSError:
+                    LOGGER.debug(
+                        'Error closing connection to %s', node
+                    )
+        for node, conn in self._poll_conns.items():
             try:
                 await conn.close()
             except OSError:
-                LOGGER.debug('Error closing connection to %s', node)
+                LOGGER.debug(
+                    'Error closing poll connection to %s', node
+                )
         await self.checkpoint_mgr.close()
 
-    async def run(self, queries: list[tuple[str, str]]) -> bool:
+    async def run(
+        self,
+        queries: list[tuple[str, str]],
+        console: rich_console.Console | None = None,
+    ) -> bool:
         """Execute queries with concurrency control.
 
         Args:
             queries: List of (query_hash, query_text) tuples.
+            console: Optional Rich console for progress display.
 
         Returns:
             True if all queries completed successfully.
@@ -92,19 +140,24 @@ class QueryRunner:
         ]
         skipped = len(queries) - len(pending)
         if skipped:
-            LOGGER.info('Skipping %d already-completed queries', skipped)
+            LOGGER.debug('Skipping %d already-completed queries', skipped)
 
         if not pending:
             LOGGER.info('All queries already completed, nothing to do')
             return True
 
-        self._progress = progress.QueryProgress(len(queries))
+        filename = str(self.settings.query_file).rsplit('/', maxsplit=1)[-1]
+        self._progress = progress.QueryProgress(
+            len(queries), filename=filename, console=console
+        )
         if skipped:
             self._progress.mark_skipped(skipped)
 
         live_ctx = self._progress.start()
         semaphore = asyncio.Semaphore(self.settings.concurrency)
         tasks: list[asyncio.Task[None]] = []
+
+        self._poll_task = asyncio.create_task(self._poll_all_progress())
 
         with live_ctx:
             for offset, query_hash, query_text in pending:
@@ -123,11 +176,23 @@ class QueryRunner:
                 tasks.append(task)
 
             if tasks:
-                await asyncio.gather(*tasks, return_exceptions=True)
+                results = await asyncio.gather(
+                    *tasks, return_exceptions=True
+                )
+                for result in results:
+                    if isinstance(result, Exception):
+                        self._stop_dispatch = True
+                        if self._failure is None:
+                            self._failure = _QueryFailure(
+                                query_text='<unknown>',
+                                node='<unknown>',
+                                error=f'{type(result).__name__}: {result}',
+                                offset=-1,
+                            )
 
-        # Cancel polling tasks
-        for pt in self._poll_tasks:
-            pt.cancel()
+        self._poll_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError, OSError):
+            await self._poll_task
 
         return self._failure is None
 
@@ -151,14 +216,11 @@ class QueryRunner:
         if self._progress is not None:
             self._progress.mark_started(query_id, node, offset)
 
-        # Start polling for progress
-        poll_task = asyncio.create_task(self._poll_progress(node, query_id))
-        self._poll_tasks.add(poll_task)
-
+        conn = await self._conn_pools[node].get()
         try:
-            conn = self.connections[node]
             async with conn.cursor() as cursor:
-                await cursor.execute(query_text, query_id=query_id)
+                cursor._query_id = query_id
+                await cursor.execute(query_text)
                 rows_read = cursor.rowcount or 0
 
             elapsed = time.monotonic() - start_time
@@ -202,67 +264,59 @@ class QueryRunner:
             if self.settings.cancel_on_failure:
                 await self._cancel_in_flight()
         finally:
-            poll_task.cancel()
-            self._poll_tasks.discard(poll_task)
+            self._conn_pools[node].put_nowait(conn)
             semaphore.release()
 
-    async def _poll_progress(self, node: str, query_id: str) -> None:
-        """Poll system.processes for query progress.
+    async def _poll_all_progress(self) -> None:
+        """Poll system.processes on all nodes for active query progress.
 
-        Uses a dedicated connection to avoid concurrent cursor operations
-        on the same connection used for query execution (the asynch native
-        TCP protocol does not support multiplexed operations).
+        Uses persistent poll connections created during connect() to
+        avoid per-query connection overhead.
         """
-        await asyncio.sleep(self.settings.poll_interval)
-        poll_conn: asynch_connection.Connection | None = None
         try:
-            poll_conn = asynch_connection.Connection(
-                host=node,
-                port=self.settings.port,
-                database=self.settings.database,
-                user=self.settings.user,
-                password=(self.settings.password.get_secret_value()),
-                secure=self.settings.secure,
-            )
-            await poll_conn.connect()
             while True:
-                try:
-                    async with poll_conn.cursor() as cursor:
-                        await cursor.execute(
-                            PROGRESS_QUERY, {'query_id': query_id}
-                        )
-                        row = cursor.fetchone()
-                        if row and self._progress is not None:
-                            self._progress.update_query(
-                                query_id=query_id,
-                                read_rows=row[1] or 0,
-                                total_rows=row[2] or 0,
-                                elapsed=row[3] or 0.0,
-                                pct=row[4] or 0.0,
-                            )
-                except (  # noqa: S110
-                    OSError,
-                    asynch_errors.ServerException,
-                    asynch_errors.UnexpectedPacketFromServerError,
-                ):
-                    pass  # Progress polling is best-effort
                 await asyncio.sleep(self.settings.poll_interval)
+                if self._progress is None:
+                    continue
+                for _node, poll_conn in self._poll_conns.items():
+                    try:
+                        async with poll_conn.cursor() as cursor:
+                            await cursor.execute(PROGRESS_QUERY)
+                            rows = await cursor.fetchall()
+                            for row in rows:
+                                self._progress.update_query(
+                                    query_id=row[0],
+                                    read_rows=row[1] or 0,
+                                    total_rows=row[2] or 0,
+                                    written_rows=row[4] or 0,
+                                    read_bytes=row[5] or 0,
+                                    written_bytes=row[6] or 0,
+                                )
+                    except (  # noqa: S110
+                        OSError,
+                        asynch_errors.ServerException,
+                        asynch_errors.UnexpectedPacketFromServerError,
+                    ):
+                        pass  # Progress polling is best-effort
         except asyncio.CancelledError:
             return
-        finally:
-            if poll_conn is not None:
-                with contextlib.suppress(OSError):
-                    await poll_conn.close()
 
     async def _cancel_in_flight(self) -> None:
         """Cancel all in-flight queries on all nodes."""
         LOGGER.info('Cancelling in-flight queries')
-        for node, conn in self.connections.items():
+        for node in self.nodes:
             try:
-                async with conn.cursor() as cursor:
-                    await cursor.execute(
-                        'KILL QUERY WHERE user = currentUser()'
-                    )
+                conn = asynch_connection.Connection(
+                    **self._conn_kwargs(node)
+                )
+                await conn.connect()
+                try:
+                    async with conn.cursor() as cursor:
+                        await cursor.execute(
+                            'KILL QUERY WHERE user = currentUser()'
+                        )
+                finally:
+                    await conn.close()
             except (OSError, asynch_errors.ServerException):  # fmt: skip
                 LOGGER.debug('Error cancelling queries on %s', node)
 

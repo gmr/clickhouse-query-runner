@@ -47,13 +47,16 @@ class _MockCursor:
         rowcount: int = 0,
         execute_side_effect: BaseException | None = None,
         fetchone_return: object = None,
+        fetchall_return: list[tuple[object, ...]] | None = None,
     ) -> None:
         self.rowcount = rowcount
         self._execute_side_effect = execute_side_effect
         self._fetchone_return = fetchone_return
+        self._fetchall_return = fetchall_return or []
         self._query_id = ''
         self.execute = mock.AsyncMock(side_effect=execute_side_effect)
-        self.fetchone = mock.MagicMock(return_value=fetchone_return)
+        self.fetchone = mock.AsyncMock(return_value=fetchone_return)
+        self.fetchall = mock.AsyncMock(return_value=self._fetchall_return)
 
     async def __aenter__(self) -> _MockCursor:
         return self
@@ -66,6 +69,7 @@ def _mock_conn(
     rowcount: int = 0,
     execute_side_effect: BaseException | None = None,
     fetchone_return: object = None,
+    fetchall_return: list[tuple[object, ...]] | None = None,
 ) -> mock.MagicMock:
     """Create a mock asynch Connection.
 
@@ -77,12 +81,23 @@ def _mock_conn(
         rowcount=rowcount,
         execute_side_effect=execute_side_effect,
         fetchone_return=fetchone_return,
+        fetchall_return=fetchall_return,
     )
     conn = mock.MagicMock()
     conn.cursor.return_value = cursor
     conn.close = mock.AsyncMock()
     conn.connect = mock.AsyncMock()
     return conn
+
+
+def _make_pool(
+    *conns: mock.MagicMock,
+) -> asyncio.Queue[mock.MagicMock]:
+    """Create an asyncio.Queue connection pool from mock connections."""
+    pool: asyncio.Queue[mock.MagicMock] = asyncio.Queue()
+    for conn in conns:
+        pool.put_nowait(conn)
+    return pool
 
 
 class QueryRunnerInitTests(unittest.TestCase):
@@ -114,15 +129,50 @@ class QueryRunnerConnectTests(unittest.IsolatedAsyncioTestCase):
         qr = runner.QueryRunner(_make_settings(host='n1,n2'))
         mock_conn = mock.AsyncMock()
         with (
-            mock.patch('asynch.connection.Connection', return_value=mock_conn),
+            mock.patch(
+                'asynch.connection.Connection', return_value=mock_conn
+            ),
             mock.patch.object(
                 qr.checkpoint_mgr, 'connect', new_callable=mock.AsyncMock
             ),
         ):
             await qr.connect()
-        self.assertEqual(len(qr.connections), 2)
-        self.assertIn('n1', qr.connections)
-        self.assertIn('n2', qr.connections)
+        self.assertEqual(len(qr._conn_pools), 2)
+        self.assertIn('n1', qr._conn_pools)
+        self.assertIn('n2', qr._conn_pools)
+
+    async def test_creates_enough_connections(self) -> None:
+        qr = runner.QueryRunner(
+            _make_settings(host='n1,n2', concurrency=4)
+        )
+        mock_conn = mock.AsyncMock()
+        with (
+            mock.patch(
+                'asynch.connection.Connection', return_value=mock_conn
+            ),
+            mock.patch.object(
+                qr.checkpoint_mgr, 'connect', new_callable=mock.AsyncMock
+            ),
+        ):
+            await qr.connect()
+        # concurrency=4, 2 nodes => 2 connections per node
+        self.assertEqual(qr._conn_pools['n1'].qsize(), 2)
+        self.assertEqual(qr._conn_pools['n2'].qsize(), 2)
+
+    async def test_creates_poll_connections(self) -> None:
+        qr = runner.QueryRunner(_make_settings(host='n1,n2'))
+        mock_conn = mock.AsyncMock()
+        with (
+            mock.patch(
+                'asynch.connection.Connection', return_value=mock_conn
+            ),
+            mock.patch.object(
+                qr.checkpoint_mgr, 'connect', new_callable=mock.AsyncMock
+            ),
+        ):
+            await qr.connect()
+        self.assertIn('n1', qr._poll_conns)
+        self.assertIn('n2', qr._poll_conns)
 
 
 class QueryRunnerCloseTests(unittest.IsolatedAsyncioTestCase):
@@ -131,7 +181,8 @@ class QueryRunnerCloseTests(unittest.IsolatedAsyncioTestCase):
     async def test_close_connections(self) -> None:
         qr = runner.QueryRunner(_make_settings())
         conn = mock.AsyncMock()
-        qr.connections = {'n1': conn}
+        qr._conn_pools = {'n1': _make_pool(conn)}
+        qr._poll_conns = {}
         with mock.patch.object(
             qr.checkpoint_mgr, 'close', new_callable=mock.AsyncMock
         ):
@@ -142,22 +193,39 @@ class QueryRunnerCloseTests(unittest.IsolatedAsyncioTestCase):
         qr = runner.QueryRunner(_make_settings())
         conn = mock.AsyncMock()
         conn.close.side_effect = OSError('fail')
-        qr.connections = {'n1': conn}
+        qr._conn_pools = {'n1': _make_pool(conn)}
+        qr._poll_conns = {}
         with mock.patch.object(
             qr.checkpoint_mgr, 'close', new_callable=mock.AsyncMock
         ):
             await qr.close()  # Should not raise
 
-    async def test_close_cancels_poll_tasks(self) -> None:
+    async def test_close_cancels_poll_task(self) -> None:
         qr = runner.QueryRunner(_make_settings())
-        mock_task = mock.MagicMock()
-        qr._poll_tasks.add(mock_task)
-        qr.connections = {}
+
+        async def _noop() -> None:
+            await asyncio.sleep(10)
+
+        poll_task = asyncio.create_task(_noop())
+        qr._poll_task = poll_task
+        qr._conn_pools = {}
+        qr._poll_conns = {}
         with mock.patch.object(
             qr.checkpoint_mgr, 'close', new_callable=mock.AsyncMock
         ):
             await qr.close()
-        mock_task.cancel.assert_called_once()
+        self.assertTrue(poll_task.cancelled())
+
+    async def test_close_poll_connections(self) -> None:
+        qr = runner.QueryRunner(_make_settings())
+        poll_conn = mock.AsyncMock()
+        qr._conn_pools = {}
+        qr._poll_conns = {'n1': poll_conn}
+        with mock.patch.object(
+            qr.checkpoint_mgr, 'close', new_callable=mock.AsyncMock
+        ):
+            await qr.close()
+        poll_conn.close.assert_awaited_once()
 
 
 class QueryRunnerRunTests(unittest.IsolatedAsyncioTestCase):
@@ -178,7 +246,14 @@ class QueryRunnerRunTests(unittest.IsolatedAsyncioTestCase):
             _make_settings(concurrency=1, poll_interval=0.001, host='n1,n2')
         )
         conn = _mock_conn(rowcount=0)
-        qr.connections = {'n1': conn, 'n2': conn}
+        qr._conn_pools = {
+            'n1': _make_pool(conn),
+            'n2': _make_pool(_mock_conn()),
+        }
+        qr._poll_conns = {
+            'n1': _mock_conn(fetchall_return=[]),
+            'n2': _mock_conn(fetchall_return=[]),
+        }
         with (
             mock.patch.object(
                 qr.checkpoint_mgr, 'load_completed', return_value={'hash1'}
@@ -201,7 +276,8 @@ class QueryRunnerRunTests(unittest.IsolatedAsyncioTestCase):
                 'syntax error', 62
             )
         )
-        qr.connections = {'n1': conn}
+        qr._conn_pools = {'n1': _make_pool(conn)}
+        qr._poll_conns = {'n1': _mock_conn(fetchall_return=[])}
         with (
             mock.patch.object(
                 qr.checkpoint_mgr, 'load_completed', return_value=set()
@@ -214,6 +290,21 @@ class QueryRunnerRunTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(result)
         self.assertIsNotNone(qr.failure)
         self.assertEqual(qr.failure.node, 'n1')
+
+    async def test_run_detects_unexpected_exception(self) -> None:
+        qr = runner.QueryRunner(
+            _make_settings(host='n1', concurrency=1, poll_interval=0.001)
+        )
+        conn = _mock_conn(execute_side_effect=TypeError('unexpected'))
+        qr._conn_pools = {'n1': _make_pool(conn)}
+        qr._poll_conns = {'n1': _mock_conn(fetchall_return=[])}
+        with mock.patch.object(
+            qr.checkpoint_mgr, 'load_completed', return_value=set()
+        ):
+            result = await qr.run([('hash1', 'SELECT 1')])
+        self.assertFalse(result)
+        self.assertIsNotNone(qr.failure)
+        self.assertIn('TypeError', qr.failure.error)
 
 
 class QueryRunnerResetTests(unittest.IsolatedAsyncioTestCase):
@@ -230,24 +321,32 @@ class ExecuteQueryTests(unittest.IsolatedAsyncioTestCase):
     """Tests for _execute_query."""
 
     async def test_successful_execution(self) -> None:
-        qr = runner.QueryRunner(_make_settings(host='n1', poll_interval=0.001))
+        qr = runner.QueryRunner(
+            _make_settings(host='n1', poll_interval=0.001)
+        )
         conn = _mock_conn(rowcount=42)
-        qr.connections = {'n1': conn}
+        qr._conn_pools = {'n1': _make_pool(conn)}
         semaphore = asyncio.Semaphore(1)
         await semaphore.acquire()
         with mock.patch.object(
             qr.checkpoint_mgr, 'mark_completed', new_callable=mock.AsyncMock
         ) as mark_mock:
-            await qr._execute_query('n1', 0, 'hash1', 'SELECT 1', semaphore)
+            await qr._execute_query(
+                'n1', 0, 'hash1', 'SELECT 1', semaphore
+            )
         mark_mock.assert_awaited_once()
         self.assertIsNone(qr._failure)
+        # Connection returned to pool
+        self.assertEqual(qr._conn_pools['n1'].qsize(), 1)
 
     async def test_failed_execution_sets_failure(self) -> None:
-        qr = runner.QueryRunner(_make_settings(host='n1', poll_interval=0.001))
+        qr = runner.QueryRunner(
+            _make_settings(host='n1', poll_interval=0.001)
+        )
         conn = _mock_conn(
             execute_side_effect=asynch_errors.ServerException('bad', 62)
         )
-        qr.connections = {'n1': conn}
+        qr._conn_pools = {'n1': _make_pool(conn)}
         semaphore = asyncio.Semaphore(1)
         await semaphore.acquire()
         with mock.patch.object(
@@ -256,6 +355,8 @@ class ExecuteQueryTests(unittest.IsolatedAsyncioTestCase):
             await qr._execute_query('n1', 0, 'hash1', 'BAD', semaphore)
         self.assertTrue(qr._stop_dispatch)
         self.assertIsNotNone(qr._failure)
+        # Connection returned to pool even on failure
+        self.assertEqual(qr._conn_pools['n1'].qsize(), 1)
 
     async def test_failed_with_cancel_on_failure(self) -> None:
         qr = runner.QueryRunner(
@@ -266,7 +367,7 @@ class ExecuteQueryTests(unittest.IsolatedAsyncioTestCase):
         conn = _mock_conn(
             execute_side_effect=asynch_errors.ServerException('bad', 62)
         )
-        qr.connections = {'n1': conn}
+        qr._conn_pools = {'n1': _make_pool(conn)}
         semaphore = asyncio.Semaphore(1)
         await semaphore.acquire()
         with (
@@ -281,9 +382,11 @@ class ExecuteQueryTests(unittest.IsolatedAsyncioTestCase):
         cancel_mock.assert_awaited_once()
 
     async def test_updates_progress(self) -> None:
-        qr = runner.QueryRunner(_make_settings(host='n1', poll_interval=0.001))
+        qr = runner.QueryRunner(
+            _make_settings(host='n1', poll_interval=0.001)
+        )
         conn = _mock_conn(rowcount=0)
-        qr.connections = {'n1': conn}
+        qr._conn_pools = {'n1': _make_pool(conn)}
         mock_progress = mock.MagicMock()
         qr._progress = mock_progress
         semaphore = asyncio.Semaphore(1)
@@ -295,10 +398,31 @@ class ExecuteQueryTests(unittest.IsolatedAsyncioTestCase):
         mock_progress.mark_started.assert_called_once()
         mock_progress.mark_completed.assert_called_once()
 
+    async def test_sets_query_id_on_cursor(self) -> None:
+        qr = runner.QueryRunner(
+            _make_settings(host='n1', poll_interval=0.001)
+        )
+        conn = _mock_conn(rowcount=0)
+        qr._conn_pools = {'n1': _make_pool(conn)}
+        semaphore = asyncio.Semaphore(1)
+        await semaphore.acquire()
+        with mock.patch.object(
+            qr.checkpoint_mgr,
+            'mark_completed',
+            new_callable=mock.AsyncMock,
+        ):
+            await qr._execute_query('n1', 0, 'hash1', 'Q', semaphore)
+        cursor = conn.cursor.return_value
+        self.assertNotEqual(cursor._query_id, '')
+        # execute should be called with query text only, not query_id kwarg
+        cursor.execute.assert_awaited_once_with('Q')
+
     async def test_oserror_sets_failure(self) -> None:
-        qr = runner.QueryRunner(_make_settings(host='n1', poll_interval=0.001))
+        qr = runner.QueryRunner(
+            _make_settings(host='n1', poll_interval=0.001)
+        )
         conn = _mock_conn(execute_side_effect=OSError('disconnect'))
-        qr.connections = {'n1': conn}
+        qr._conn_pools = {'n1': _make_pool(conn)}
         semaphore = asyncio.Semaphore(1)
         await semaphore.acquire()
         with mock.patch.object(
@@ -309,63 +433,78 @@ class ExecuteQueryTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('disconnect', qr.failure.error)
 
 
-class PollProgressTests(unittest.IsolatedAsyncioTestCase):
-    """Tests for _poll_progress."""
+class PollAllProgressTests(unittest.IsolatedAsyncioTestCase):
+    """Tests for _poll_all_progress."""
 
     async def test_cancellation(self) -> None:
-        qr = runner.QueryRunner(_make_settings(host='n1', poll_interval=0.001))
-        poll_conn = _mock_conn(fetchone_return=None)
-        with mock.patch(
-            'asynch.connection.Connection', return_value=poll_conn
-        ):
-            task = asyncio.create_task(qr._poll_progress('n1', 'qid'))
-            await asyncio.sleep(0.05)
-            task.cancel()
-            # _poll_progress catches CancelledError and returns
-            await task
+        qr = runner.QueryRunner(
+            _make_settings(host='n1', poll_interval=0.001)
+        )
+        qr._poll_conns = {'n1': _mock_conn(fetchall_return=[])}
+        task = asyncio.create_task(qr._poll_all_progress())
+        await asyncio.sleep(0.05)
+        task.cancel()
+        await task
         self.assertTrue(task.done())
 
-    async def test_updates_progress_on_row(self) -> None:
-        qr = runner.QueryRunner(_make_settings(host='n1', poll_interval=0.001))
-        poll_conn = _mock_conn(fetchone_return=('qid', 500, 1000, 2.5, 50.0))
+    async def test_updates_progress_on_rows(self) -> None:
+        qr = runner.QueryRunner(
+            _make_settings(host='n1', poll_interval=0.001)
+        )
+        qr._poll_conns = {
+            'n1': _mock_conn(
+                fetchall_return=[
+                    ('qid-1', 500, 1000, 2.5, 200, 4096, 2048),
+                ]
+            ),
+        }
         mock_progress = mock.MagicMock()
         qr._progress = mock_progress
-        with mock.patch(
-            'asynch.connection.Connection', return_value=poll_conn
-        ):
-            task = asyncio.create_task(qr._poll_progress('n1', 'qid'))
-            await asyncio.sleep(0.05)
-            task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await task
+        task = asyncio.create_task(qr._poll_all_progress())
+        await asyncio.sleep(0.05)
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
         mock_progress.update_query.assert_called()
+        call_kwargs = mock_progress.update_query.call_args
+        self.assertEqual(call_kwargs.kwargs['query_id'], 'qid-1')
+        self.assertEqual(call_kwargs.kwargs['read_rows'], 500)
 
     async def test_handles_server_error(self) -> None:
-        qr = runner.QueryRunner(_make_settings(host='n1', poll_interval=0.001))
-        poll_conn = _mock_conn(
-            execute_side_effect=asynch_errors.ServerException('err', 62)
+        qr = runner.QueryRunner(
+            _make_settings(host='n1', poll_interval=0.001)
         )
-        with mock.patch(
-            'asynch.connection.Connection', return_value=poll_conn
-        ):
-            task = asyncio.create_task(qr._poll_progress('n1', 'qid'))
-            await asyncio.sleep(0.05)
-            task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await task
+        qr._poll_conns = {
+            'n1': _mock_conn(
+                execute_side_effect=asynch_errors.ServerException('err', 62)
+            ),
+        }
+        task = asyncio.create_task(qr._poll_all_progress())
+        await asyncio.sleep(0.05)
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
 
-    async def test_closes_connection_on_cancel(self) -> None:
-        qr = runner.QueryRunner(_make_settings(host='n1', poll_interval=0.001))
-        poll_conn = _mock_conn(fetchone_return=None)
-        with mock.patch(
-            'asynch.connection.Connection', return_value=poll_conn
-        ):
-            task = asyncio.create_task(qr._poll_progress('n1', 'qid'))
-            await asyncio.sleep(0.05)
-            task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await task
-        poll_conn.close.assert_awaited_once()
+    async def test_multiple_nodes(self) -> None:
+        qr = runner.QueryRunner(
+            _make_settings(host='n1,n2', poll_interval=0.001)
+        )
+        qr._poll_conns = {
+            'n1': _mock_conn(
+                fetchall_return=[('q1', 100, 500, 1.0, 0, 1024, 0)]
+            ),
+            'n2': _mock_conn(
+                fetchall_return=[('q2', 0, 0, 0.5, 50, 0, 512)]
+            ),
+        }
+        mock_progress = mock.MagicMock()
+        qr._progress = mock_progress
+        task = asyncio.create_task(qr._poll_all_progress())
+        await asyncio.sleep(0.05)
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+        self.assertGreaterEqual(mock_progress.update_query.call_count, 2)
 
 
 class CancelInFlightTests(unittest.IsolatedAsyncioTestCase):
@@ -374,16 +513,20 @@ class CancelInFlightTests(unittest.IsolatedAsyncioTestCase):
     async def test_sends_kill_query(self) -> None:
         qr = runner.QueryRunner(_make_settings(host='n1'))
         conn = _mock_conn()
-        qr.connections = {'n1': conn}
-        await qr._cancel_in_flight()
+        with mock.patch(
+            'asynch.connection.Connection', return_value=conn
+        ):
+            await qr._cancel_in_flight()
         cursor = conn.cursor.return_value
         cursor.execute.assert_awaited_once()
 
     async def test_handles_error(self) -> None:
         qr = runner.QueryRunner(_make_settings(host='n1'))
         conn = _mock_conn(execute_side_effect=OSError('fail'))
-        qr.connections = {'n1': conn}
-        await qr._cancel_in_flight()  # Should not raise
+        with mock.patch(
+            'asynch.connection.Connection', return_value=conn
+        ):
+            await qr._cancel_in_flight()  # Should not raise
 
 
 class QueryFailureTests(unittest.TestCase):
