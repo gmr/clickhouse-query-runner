@@ -63,6 +63,7 @@ class QueryRunner:
             'user': self.settings.user,
             'password': self.settings.password.get_secret_value(),
             'secure': self.settings.secure,
+            'client_name': 'clickhouse-query-runner',
         }
 
     async def connect(self) -> None:
