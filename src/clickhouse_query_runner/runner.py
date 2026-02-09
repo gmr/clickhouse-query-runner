@@ -83,7 +83,11 @@ class QueryRunner:
                     **self._conn_kwargs(node)
                 )
                 await poll_conn.connect()
-            except OSError:
+            except (
+                OSError,
+                asynch_errors.ServerException,
+                asynch_errors.UnexpectedPacketFromServerError,
+            ):
                 while not pool.empty():
                     with contextlib.suppress(OSError):
                         await pool.get_nowait().close()

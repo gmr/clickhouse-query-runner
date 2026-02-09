@@ -49,6 +49,21 @@ class SetupLoggingTests(unittest.TestCase):
         self.assertEqual(logging.getLogger().level, logging.DEBUG)
 
 
+class EnvVarForFieldTests(unittest.TestCase):
+    """Tests for _env_var_for_field."""
+
+    def test_default_prefix(self) -> None:
+        self.assertEqual(cli._env_var_for_field('host'), 'CLICKHOUSE_HOST')
+
+    def test_validation_alias_field(self) -> None:
+        self.assertEqual(cli._env_var_for_field('valkey_url'), 'VALKEY_URL')
+
+    def test_unknown_field(self) -> None:
+        self.assertEqual(
+            cli._env_var_for_field('nonexistent'), 'CLICKHOUSE_NONEXISTENT'
+        )
+
+
 class MainTests(unittest.TestCase):
     """Tests for main entry point."""
 

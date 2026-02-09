@@ -32,6 +32,22 @@ def setup_logging(
     )
 
 
+def _env_var_for_field(field: str) -> str:
+    """Return the environment variable name for a settings field.
+
+    Fields with a ``validation_alias`` (e.g. ``valkey_url``) use the
+    first alias choice instead of the default ``CLICKHOUSE_`` prefix.
+    """
+    field_info = settings.RunnerSettings.model_fields.get(field)
+    if field_info is not None and isinstance(
+        field_info.validation_alias, pydantic.AliasChoices
+    ):
+        first = field_info.validation_alias.choices[0]
+        if isinstance(first, str):
+            return first
+    return f'CLICKHOUSE_{field.upper()}'
+
+
 def main() -> None:
     """Main entry point."""
     rich_console = console.Console()
@@ -41,7 +57,7 @@ def main() -> None:
         for error in err.errors():
             field = '.'.join(str(loc) for loc in error['loc'])
             flag = field.replace('_', '-')
-            env_var = f'CLICKHOUSE_{field.upper()}'
+            env_var = _env_var_for_field(field)
             if error['type'] == 'missing':
                 rich_console.print(
                     f'[red]Missing required setting:[/red] '
