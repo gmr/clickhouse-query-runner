@@ -464,9 +464,7 @@ class PollAllProgressTests(unittest.IsolatedAsyncioTestCase):
             _make_settings(host='n1,n2', poll_interval=0.001)
         )
         qr._poll_conns = {
-            'n1': _mock_conn(
-                fetchall_return=[('q1', 100, 500, 1.0, 0, 1024)]
-            ),
+            'n1': _mock_conn(fetchall_return=[('q1', 100, 500, 1.0, 0, 1024)]),
             'n2': _mock_conn(fetchall_return=[('q2', 0, 0, 0.5, 50, 512)]),
         }
         mock_progress = mock.MagicMock()

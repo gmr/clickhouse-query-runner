@@ -279,9 +279,10 @@ class QueryRunner:
                             await cursor.execute(PROGRESS_QUERY)
                             rows = await cursor.fetchall()
                             for row in rows:
-                                # Columns: query_id[0], read_rows[1],
-                                # total_rows_approx[2], elapsed[3],
-                                # written_rows[4], memory_usage[5]
+                                # PROGRESS_QUERY columns: query_id[0],
+                                # read_rows[1], total_rows_approx[2],
+                                # elapsed[3], written_rows[4],
+                                # memory_usage[5]
                                 self._progress.update_query(
                                     query_id=row[0],
                                     read_rows=row[1] or 0,
