@@ -60,6 +60,6 @@ A CLI tool for executing SQL queries from a file against a ClickHouse cluster wi
 
 ### Key Patterns
 
-- **asynch driver**: `conn.cursor()` is sync returning an async context manager. Set `cursor._query_id` before `execute()`. Uses `%(name)s` parameter style.
+- **asynch driver**: `conn.cursor()` is sync returning an async context manager. Use `cursor.set_query_id(query_id)` before `execute()`. `fetchone()`/`fetchall()` are async and must be awaited. Uses `%(name)s` parameter style.
 - **Exception handling**: Catch `(OSError, asynch_errors.ServerException, asynch_errors.UnexpectedPacketFromServerError)` for ClickHouse operations, `(OSError, valkey.exceptions.ValkeyError)` for Valkey. Never bare `except:`.
 - **Mocking asynch in tests**: Use `MagicMock` (not `AsyncMock`) for connections since `cursor()` is sync. Use a custom `_MockCursor` class implementing `__aenter__`/`__aexit__`.

@@ -204,7 +204,7 @@ class QueryRunner:
         conn = await self._conn_pools[node].get()
         try:
             async with conn.cursor() as cursor:
-                cursor._query_id = query_id
+                cursor.set_query_id(query_id)
                 await cursor.execute(query_text)
                 rows_read = cursor.rowcount or 0
 

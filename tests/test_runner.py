@@ -54,6 +54,9 @@ class _MockCursor:
         self._fetchone_return = fetchone_return
         self._fetchall_return = fetchall_return or []
         self._query_id = ''
+        self.set_query_id = mock.MagicMock(
+            side_effect=lambda qid='': setattr(self, '_query_id', qid)
+        )
         self.execute = mock.AsyncMock(side_effect=execute_side_effect)
         self.fetchone = mock.AsyncMock(return_value=fetchone_return)
         self.fetchall = mock.AsyncMock(return_value=self._fetchall_return)
