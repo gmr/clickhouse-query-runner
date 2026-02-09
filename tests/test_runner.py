@@ -428,10 +428,10 @@ class PollAllProgressTests(unittest.IsolatedAsyncioTestCase):
     async def test_updates_progress_on_rows(self) -> None:
         qr = runner.QueryRunner(_make_settings(host='n1', poll_interval=0.001))
         # Tuple: (query_id, read_rows, total_rows_approx, elapsed,
-        #         written_rows, read_bytes, written_bytes)
+        #         written_rows, memory_usage)
         qr._poll_conns = {
             'n1': _mock_conn(
-                fetchall_return=[('qid-1', 500, 1000, 2.5, 200, 4096, 2048)]
+                fetchall_return=[('qid-1', 500, 1000, 2.5, 200, 4096)]
             )
         }
         mock_progress = mock.MagicMock()
@@ -465,9 +465,9 @@ class PollAllProgressTests(unittest.IsolatedAsyncioTestCase):
         )
         qr._poll_conns = {
             'n1': _mock_conn(
-                fetchall_return=[('q1', 100, 500, 1.0, 0, 1024, 0)]
+                fetchall_return=[('q1', 100, 500, 1.0, 0, 1024)]
             ),
-            'n2': _mock_conn(fetchall_return=[('q2', 0, 0, 0.5, 50, 0, 512)]),
+            'n2': _mock_conn(fetchall_return=[('q2', 0, 0, 0.5, 50, 512)]),
         }
         mock_progress = mock.MagicMock()
         qr._progress = mock_progress

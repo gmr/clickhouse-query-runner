@@ -68,8 +68,7 @@ class QueryProgress:
         read_rows: int,
         total_rows: int,
         written_rows: int,
-        read_bytes: int,
-        written_bytes: int,
+        memory_usage: int,
     ) -> None:
         """Update progress for an active query."""
         if query_id in self._active_queries:
@@ -77,8 +76,7 @@ class QueryProgress:
             aq.read_rows = read_rows
             aq.total_rows = total_rows
             aq.written_rows = written_rows
-            aq.read_bytes = read_bytes
-            aq.written_bytes = written_bytes
+            aq.memory_usage = memory_usage
 
     def mark_completed(self, query_id: str, elapsed: float) -> None:
         """Record that a query has completed."""
@@ -122,25 +120,25 @@ class QueryProgress:
                 'Rows', style='green', justify='right', min_width=14
             )
             query_table.add_column(
-                'Bytes', style='magenta', justify='right', min_width=10
+                'Memory', style='magenta', justify='right', min_width=10
             )
             query_table.add_column(
                 'Elapsed', style='blue', justify='right', min_width=8
             )
             for aq in self._active_queries.values():
-                rows, total, bytes_val = _query_metrics(aq)
+                rows, total = _query_metrics(aq)
                 bar = progress.ProgressBar(
                     total=max(total, rows, 1), completed=rows, width=32
                 )
                 rows_str = _format_rows(rows, total)
-                bytes_str = _human_bytes(bytes_val)
+                memory_str = _human_bytes(aq.memory_usage)
                 elapsed_str = _format_elapsed(time.monotonic() - aq.start_time)
                 query_table.add_row(
                     aq.node.split('.', maxsplit=1)[0],
                     str(aq.offset),
                     bar,
                     rows_str,
-                    bytes_str,
+                    memory_str,
                     elapsed_str,
                 )
             layout.add_row(query_table)
@@ -156,13 +154,12 @@ class _ActiveQuery:
     """Track state of a currently executing query."""
 
     __slots__ = (
+        'memory_usage',
         'node',
         'offset',
-        'read_bytes',
         'read_rows',
         'start_time',
         'total_rows',
-        'written_bytes',
         'written_rows',
     )
 
@@ -173,19 +170,18 @@ class _ActiveQuery:
         self.read_rows = 0
         self.total_rows = 0
         self.written_rows = 0
-        self.read_bytes = 0
-        self.written_bytes = 0
+        self.memory_usage = 0
 
 
-def _query_metrics(aq: _ActiveQuery) -> tuple[int, int, int]:
-    """Pick the best available row and byte metrics for display.
+def _query_metrics(aq: _ActiveQuery) -> tuple[int, int]:
+    """Pick the best available row metrics for display.
 
-    Returns (active_rows, total_rows, active_bytes) preferring
-    write metrics for write-heavy queries and read metrics otherwise.
+    Returns (active_rows, total_rows) preferring write metrics
+    for write-heavy queries and read metrics otherwise.
     """
     if aq.written_rows > 0 and aq.written_rows >= aq.read_rows:
-        return aq.written_rows, aq.total_rows, aq.written_bytes
-    return aq.read_rows, aq.total_rows, aq.read_bytes
+        return aq.written_rows, aq.total_rows
+    return aq.read_rows, aq.total_rows
 
 
 def _format_rows(active: int, total: int) -> str:

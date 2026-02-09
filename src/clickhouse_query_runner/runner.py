@@ -25,8 +25,7 @@ SELECT query_id,
        total_rows_approx,
        elapsed,
        written_rows,
-       read_bytes,
-       written_bytes
+       memory_usage
   FROM system.processes
  WHERE user = currentUser()
    AND query_id != ''"""
@@ -282,15 +281,13 @@ class QueryRunner:
                             for row in rows:
                                 # Columns: query_id[0], read_rows[1],
                                 # total_rows_approx[2], elapsed[3],
-                                # written_rows[4], read_bytes[5],
-                                # written_bytes[6]
+                                # written_rows[4], memory_usage[5]
                                 self._progress.update_query(
                                     query_id=row[0],
                                     read_rows=row[1] or 0,
                                     total_rows=row[2] or 0,
                                     written_rows=row[4] or 0,
-                                    read_bytes=row[5] or 0,
-                                    written_bytes=row[6] or 0,
+                                    memory_usage=row[5] or 0,
                                 )
                     except (  # noqa: S110
                         OSError,

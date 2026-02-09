@@ -60,13 +60,12 @@ class QueryProgressTrackingTests(unittest.TestCase):
             read_rows=500,
             total_rows=1000,
             written_rows=0,
-            read_bytes=4096,
-            written_bytes=0,
+            memory_usage=4096,
         )
         aq = qp._active_queries['q1']
         self.assertEqual(aq.read_rows, 500)
         self.assertEqual(aq.total_rows, 1000)
-        self.assertEqual(aq.read_bytes, 4096)
+        self.assertEqual(aq.memory_usage, 4096)
 
     def test_update_query_write(self) -> None:
         qp = progress.QueryProgress(5)
@@ -76,12 +75,11 @@ class QueryProgressTrackingTests(unittest.TestCase):
             read_rows=0,
             total_rows=1000,
             written_rows=200,
-            read_bytes=0,
-            written_bytes=8192,
+            memory_usage=8192,
         )
         aq = qp._active_queries['q1']
         self.assertEqual(aq.written_rows, 200)
-        self.assertEqual(aq.written_bytes, 8192)
+        self.assertEqual(aq.memory_usage, 8192)
 
     def test_update_unknown_query(self) -> None:
         qp = progress.QueryProgress(5)
@@ -90,8 +88,7 @@ class QueryProgressTrackingTests(unittest.TestCase):
             read_rows=500,
             total_rows=1000,
             written_rows=0,
-            read_bytes=0,
-            written_bytes=0,
+            memory_usage=0,
         )
         self.assertNotIn('unknown', qp._active_queries)
 
@@ -151,7 +148,7 @@ class RenderTests(unittest.TestCase):
         qp.mark_started('q1', 'node-a', 0)
         qp._active_queries['q1'].read_rows = 500
         qp._active_queries['q1'].total_rows = 1000
-        qp._active_queries['q1'].read_bytes = 4096
+        qp._active_queries['q1'].memory_usage = 4096
         layout = qp._render()
         self.assertIsNotNone(layout)
 
@@ -160,7 +157,7 @@ class RenderTests(unittest.TestCase):
         qp.mark_started('q1', 'node-a', 0)
         qp._active_queries['q1'].written_rows = 200
         qp._active_queries['q1'].total_rows = 1000
-        qp._active_queries['q1'].written_bytes = 8192
+        qp._active_queries['q1'].memory_usage = 8192
         layout = qp._render()
         self.assertIsNotNone(layout)
 
@@ -192,39 +189,31 @@ class QueryMetricsTests(unittest.TestCase):
         aq = progress._ActiveQuery('n1', 0, 100.0)
         aq.read_rows = 500
         aq.total_rows = 1000
-        aq.read_bytes = 4096
-        rows, total, bytes_val = progress._query_metrics(aq)
+        rows, total = progress._query_metrics(aq)
         self.assertEqual(rows, 500)
         self.assertEqual(total, 1000)
-        self.assertEqual(bytes_val, 4096)
 
     def test_write_only(self) -> None:
         aq = progress._ActiveQuery('n1', 0, 100.0)
         aq.written_rows = 200
         aq.total_rows = 1000
-        aq.written_bytes = 8192
-        rows, total, bytes_val = progress._query_metrics(aq)
+        rows, total = progress._query_metrics(aq)
         self.assertEqual(rows, 200)
         self.assertEqual(total, 1000)
-        self.assertEqual(bytes_val, 8192)
 
     def test_both_prefers_larger(self) -> None:
         aq = progress._ActiveQuery('n1', 0, 100.0)
         aq.read_rows = 100
         aq.written_rows = 200
         aq.total_rows = 1000
-        aq.read_bytes = 1024
-        aq.written_bytes = 2048
-        rows, total, bytes_val = progress._query_metrics(aq)
+        rows, total = progress._query_metrics(aq)
         self.assertEqual(rows, 200)
-        self.assertEqual(bytes_val, 2048)
 
     def test_no_activity(self) -> None:
         aq = progress._ActiveQuery('n1', 0, 100.0)
-        rows, total, bytes_val = progress._query_metrics(aq)
+        rows, total = progress._query_metrics(aq)
         self.assertEqual(rows, 0)
         self.assertEqual(total, 0)
-        self.assertEqual(bytes_val, 0)
 
 
 class HumanNumberTests(unittest.TestCase):
@@ -313,5 +302,4 @@ class ActiveQueryTests(unittest.TestCase):
         self.assertEqual(aq.read_rows, 0)
         self.assertEqual(aq.total_rows, 0)
         self.assertEqual(aq.written_rows, 0)
-        self.assertEqual(aq.read_bytes, 0)
-        self.assertEqual(aq.written_bytes, 0)
+        self.assertEqual(aq.memory_usage, 0)
