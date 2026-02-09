@@ -7,6 +7,7 @@ import logging
 import pathlib
 import sys
 
+import pydantic
 from rich import console
 from rich import logging as rich_logging
 
@@ -33,8 +34,26 @@ def setup_logging(
 
 def main() -> None:
     """Main entry point."""
-    runner_settings = settings.RunnerSettings()
     rich_console = console.Console()
+    try:
+        runner_settings = settings.RunnerSettings()
+    except pydantic.ValidationError as err:
+        for error in err.errors():
+            field = '.'.join(str(loc) for loc in error['loc'])
+            flag = field.replace('_', '-')
+            env_var = f'CLICKHOUSE_{field.upper()}'
+            if error['type'] == 'missing':
+                rich_console.print(
+                    f'[red]Missing required setting:[/red] '
+                    f'[bold]{field}[/bold] '
+                    f'(--{flag} or {env_var})'
+                )
+            else:
+                rich_console.print(
+                    f'[red]Invalid value for [bold]{field}[/bold]:[/red] '
+                    f'{error["msg"]}'
+                )
+        sys.exit(1)
     setup_logging(rich_console, runner_settings.verbose)
 
     query_file = pathlib.Path(runner_settings.query_file)
